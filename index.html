@@ -101,6 +101,7 @@
   .step-street{font-size:13px;color:var(--text);margin-top:2px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .step-next{font-size:11px;color:var(--muted);margin-top:2px}
+  .step-eta{font-size:11px;color:var(--green);margin-top:4px}
 
   .test-row{display:flex;gap:6px;flex-wrap:wrap}
 
@@ -159,16 +160,16 @@
     </div>
   </div>
 
-  <!-- TEST NHANH — gửi lệnh thử không cần GPS -->
+  <!-- TEST NHANH -->
   <div class="card" id="testCard" style="display:none">
     <div class="card-title">🧪 Test nhanh (gửi lệnh demo)</div>
     <div class="test-row">
-      <button class="btn btn-test" onclick="testSend('STRAIGHT',350,'Vo Van Tan','Nguyen Hue')">⬆️ Thẳng</button>
-      <button class="btn btn-test" onclick="testSend('LEFT',150,'Nguyen Hue','Le Loi')">↰ Trái</button>
-      <button class="btn btn-test" onclick="testSend('RIGHT',80,'Le Loi','Nam Ky')">↱ Phải</button>
-      <button class="btn btn-test" onclick="testSend('UTURN',200,'CMT8','Ly Tu Trong')">↩️ Quay đầu</button>
-      <button class="btn btn-test" onclick="testSend('ARRIVE',0,'Ben Thanh','')">✅ Đến nơi</button>
-      <button class="btn btn-test" onclick="testSend('WAIT',0,'','')">⏳ Chờ</button>
+      <button class="btn btn-test" onclick="testSend('STRAIGHT',350,'Vo Van Tan','Nguyen Hue','5 phut',3)">⬆️ Thẳng</button>
+      <button class="btn btn-test" onclick="testSend('LEFT',150,'Nguyen Hue','Le Loi','4 phut',2)">↰ Trái</button>
+      <button class="btn btn-test" onclick="testSend('RIGHT',80,'Le Loi','Nam Ky','2 phut',1)">↱ Phải</button>
+      <button class="btn btn-test" onclick="testSend('UTURN',200,'CMT8','Ly Tu Trong','6 phut',2)">↩️ Quay đầu</button>
+      <button class="btn btn-test" onclick="testSend('ARRIVE',0,'Ben Thanh','','0 phut',0)">✅ Đến nơi</button>
+      <button class="btn btn-test" onclick="testSend('WAIT',0,'','','',0)">⏳ Chờ</button>
     </div>
   </div>
 
@@ -201,8 +202,8 @@
   <div class="route-box" id="routeBox">
     <div class="route-meta">
       <div class="r-chip"><div class="v" id="rDist">—</div><div class="l">Quãng đường</div></div>
-      <div class="r-chip"><div class="v" id="rTime">—</div><div class="l">Thời gian</div></div>
-      <div class="r-chip"><div class="v" id="rSteps">—</div><div class="l">Số bước</div></div>
+      <div class="r-chip"><div class="v" id="rTime">—</div><div class="l">Thời gian (xe máy)</div></div>
+      <div class="r-chip"><div class="v" id="rSteps">—</div><div class="l">Số lượt rẽ</div></div>
     </div>
     <div class="step-box">
       <div class="step-arr" id="sArr">⬆️</div>
@@ -210,6 +211,7 @@
         <div class="step-dist"   id="sDist">—</div>
         <div class="step-street" id="sStreet">Đang tính...</div>
         <div class="step-next"   id="sNext"></div>
+        <div class="step-eta"    id="sEta"></div>
       </div>
     </div>
     <button class="btn btn-stop" style="margin-top:10px" onclick="stopNav()">
@@ -234,6 +236,10 @@ const SVC_UUID    = '12345678-1234-1234-1234-123456789abc';
 const NAV_UUID    = '12345678-1234-1234-1234-123456789abd';
 const STATUS_UUID = '12345678-1234-1234-1234-123456789abe';
 
+// Hệ số điều chỉnh thời gian: OSRM tính theo ô tô,
+// xe máy VN trong nội thành thường lâu hơn ~1.4-1.6 lần
+const MOTORBIKE_FACTOR = 1.5;
+
 // ════════════════════════════════════════════════════════════
 //  STATE
 // ════════════════════════════════════════════════════════════
@@ -249,8 +255,19 @@ let sendTimer    = null;
 let allSteps     = [];
 let currentStep  = 0;
 let acTimer      = null;
+let smoothDist   = null; // làm mượt khoảng cách hiển thị
 
 const ARRIVE_M = 30;
+
+// ════════════════════════════════════════════════════════════
+//  BỎ DẤU TIẾNG VIỆT — ST7789 không có font Unicode
+// ════════════════════════════════════════════════════════════
+function removeDiacritics(str) {
+  if (!str) return '';
+  str = str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  str = str.replace(/đ/g,'d').replace(/Đ/g,'D');
+  return str;
+}
 
 // ════════════════════════════════════════════════════════════
 //  BLE — KẾT NỐI
@@ -322,8 +339,17 @@ function setBleUI(connected) {
 // ════════════════════════════════════════════════════════════
 async function sendNav(payload) {
   if (!navChar) { toast('Chưa kết nối BLE','err'); return; }
+  // Bỏ dấu trước khi gửi — màn ST7789 không hỗ trợ Unicode
+  const clean = {
+    dir:    payload.dir,
+    dist:   payload.dist,
+    street: removeDiacritics(payload.street || ''),
+    next:   removeDiacritics(payload.next || ''),
+    eta:    removeDiacritics(payload.eta || ''),
+    turns:  payload.turns || 0
+  };
   try {
-    const enc = new TextEncoder().encode(JSON.stringify(payload));
+    const enc = new TextEncoder().encode(JSON.stringify(clean));
     await navChar.writeValueWithoutResponse(enc);
   } catch(e) {
     toast('Lỗi gửi: ' + e.message, 'err');
@@ -331,8 +357,8 @@ async function sendNav(payload) {
 }
 
 // ─── NÚT TEST NHANH ─────────────────────────────────────────
-function testSend(dir, dist, street, next) {
-  const payload = { dir, dist, street, next };
+function testSend(dir, dist, street, next, eta, turns) {
+  const payload = { dir, dist, street, next, eta, turns };
   sendNav(payload);
   updateStepUI(payload);
   toast('Đã gửi: ' + dir, 'info');
@@ -434,8 +460,16 @@ function parseDir(maneuver) {
   return 'STRAIGHT';
 }
 
+// ─── ĐỊNH DẠNG PHÚT → CHUỖI ──────────────────────────────────
+function fmtMinutes(min) {
+  min = Math.max(1, Math.round(min));
+  if (min < 60) return min + ' phut';
+  const h = Math.floor(min/60), m = min%60;
+  return h + 'h' + (m>0 ? ' '+m+'p' : '');
+}
+
 // ════════════════════════════════════════════════════════════
-//  BẮT ĐẦU DẪN ĐƯỜNG (dùng OSRM routing — miễn phí, không cần key)
+//  BẮT ĐẦU DẪN ĐƯỜNG (OSRM routing — miễn phí, không cần key)
 // ════════════════════════════════════════════════════════════
 async function startNav() {
   if (!userPos || !selectedDest || !navChar) return;
@@ -451,9 +485,12 @@ async function startNav() {
 
     allSteps = data.routes[0].legs[0].steps;
     currentStep = 0;
+    smoothDist = null;
+
+    const totalMin = data.routes[0].duration/60 * MOTORBIKE_FACTOR;
 
     document.getElementById('rDist').textContent  = (data.routes[0].distance/1000).toFixed(1)+'km';
-    document.getElementById('rTime').textContent  = Math.round(data.routes[0].duration/60)+' phút';
+    document.getElementById('rTime').textContent  = fmtMinutes(totalMin);
     document.getElementById('rSteps').textContent = allSteps.length;
     document.getElementById('routeBox').classList.add('show');
 
@@ -471,6 +508,13 @@ async function startNav() {
   }
 }
 
+// ─── TÍNH ETA CÒN LẠI TỪ STEP idx ĐẾN HẾT ROUTE ──────────────
+function remainingEtaMin(idx) {
+  let sec = 0;
+  for (let i = idx; i < allSteps.length; i++) sec += allSteps[i].duration || 0;
+  return sec/60 * MOTORBIKE_FACTOR;
+}
+
 function sendStep(idx) {
   if (!allSteps.length) return;
   const step = allSteps[idx];
@@ -478,24 +522,41 @@ function sendStep(idx) {
 
   const maneuver = step.maneuver?.type || 'straight';
   const dir = parseDir(maneuver);
-  const dist = Math.round(haversine(
+
+  const rawDist = haversine(
     userPos.lat, userPos.lng,
     step.maneuver.location[1], step.maneuver.location[0]
-  ));
+  );
+
+  // Làm mượt khoảng cách — giảm nhiễu GPS (EMA)
+  if (smoothDist === null || dir !== sendStep._lastDir) {
+    smoothDist = rawDist;
+  } else {
+    smoothDist = smoothDist * 0.6 + rawDist * 0.4;
+  }
+  sendStep._lastDir = dir;
+  const dist = Math.round(smoothDist);
+
+  const etaMin = remainingEtaMin(idx);
+  const turnsLeft = allSteps.length - idx;
 
   const payload = {
     dir,
     dist,
-    street: (step.name || 'Tiep tuc').substring(0,28),
-    next:   next ? (next.name||'').substring(0,25) : ''
+    street: step.name || 'Duong chua co ten',
+    next:   next ? (next.name || 'Duong tiep theo') : '',
+    eta:    fmtMinutes(etaMin),
+    turns:  turnsLeft
   };
 
   const dDest = haversine(userPos.lat,userPos.lng,selectedDest.lat,selectedDest.lng);
   if (dDest < ARRIVE_M) {
     payload.dir    = 'ARRIVE';
     payload.dist   = 0;
-    payload.street = selectedDest.name.substring(0,28);
+    payload.street = selectedDest.name;
     payload.next   = '';
+    payload.eta    = '0 phut';
+    payload.turns  = 0;
     clearInterval(sendTimer);
     toast('🎉 Đã đến nơi!', 'ok');
     isNavigating = false;
@@ -512,6 +573,8 @@ function updateStepUI(payload) {
     ? (payload.dist/1000).toFixed(1)+'km' : payload.dist+'m';
   document.getElementById('sStreet').textContent = payload.street || '—';
   document.getElementById('sNext').textContent   = payload.next ? 'Tiếp: '+payload.next : '';
+  document.getElementById('sEta').textContent    = payload.eta
+    ? `⏱ Còn ${payload.eta}${payload.turns ? ' • '+payload.turns+' lượt rẽ' : ''}` : '';
 }
 
 function updateLocation() {
@@ -523,6 +586,7 @@ function updateLocation() {
     if (d < bestD) { bestD=d; bestIdx=i; }
     if (d > 500) break;
   }
+  if (bestIdx !== currentStep) smoothDist = null; // reset khi đổi step
   currentStep = bestIdx;
   sendStep(bestIdx);
 }
@@ -530,10 +594,10 @@ function updateLocation() {
 function stopNav() {
   clearInterval(sendTimer);
   isNavigating = false;
-  allSteps = []; currentStep = 0;
+  allSteps = []; currentStep = 0; smoothDist = null;
   document.getElementById('routeBox').classList.remove('show');
   updateStartBtn();
-  sendNav({ dir:'WAIT', dist:0, street:'', next:'' });
+  sendNav({ dir:'WAIT', dist:0, street:'', next:'', eta:'', turns:0 });
   toast('Đã dừng dẫn đường', 'info');
 }
 
